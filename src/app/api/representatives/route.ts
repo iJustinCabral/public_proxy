@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAllTallies, getBills, getTally } from "@/lib/db";
+import { getAllTallies } from "@/lib/db";
 
 export async function GET(req: NextRequest) {
   try {

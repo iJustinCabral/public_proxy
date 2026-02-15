@@ -1,14 +1,22 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Bill, PoliticalProfile } from "@/lib/db";
 
-function getClient(): Anthropic {
-  return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const DEFAULT_MODEL = "claude-sonnet-4-5-20250929";
+
+export function getClient(apiKey?: string): Anthropic {
+  const key = apiKey || process.env.ANTHROPIC_API_KEY;
+  if (!key) {
+    throw new Error(
+      "No Anthropic API key configured. Set ANTHROPIC_API_KEY in .env or provide your key in your profile settings."
+    );
+  }
+  return new Anthropic({ apiKey: key });
 }
 
 // ─── Summarize a bill in plain English ───
 
-export async function summarizeBill(bill: Bill): Promise<string> {
-  const client = getClient();
+export async function summarizeBill(bill: Bill, apiKey?: string): Promise<string> {
+  const client = getClient(apiKey);
 
   const billContext = [
     `Title: ${bill.title}`,
@@ -25,7 +33,7 @@ export async function summarizeBill(bill: Bill): Promise<string> {
     .join("\n");
 
   const message = await client.messages.create({
-    model: "claude-sonnet-4-5-20250929",
+    model: DEFAULT_MODEL,
     max_tokens: 1024,
     messages: [
       {
@@ -52,14 +60,15 @@ ${billContext}`,
 
 export async function analyzeAndVote(
   bill: Bill,
-  profile: PoliticalProfile
+  profile: PoliticalProfile,
+  apiKey?: string
 ): Promise<{
   vote: "yea" | "nay" | "abstain";
   confidence: number;
   reasoning: string;
   key_factors: string[];
 }> {
-  const client = getClient();
+  const client = getClient(apiKey);
 
   const profileContext = `
 VOTER POLITICAL PROFILE:
@@ -88,7 +97,7 @@ ${bill.ai_summary ? `- Plain English Summary: ${bill.ai_summary}` : ""}
   `.trim();
 
   const message = await client.messages.create({
-    model: "claude-sonnet-4-5-20250929",
+    model: DEFAULT_MODEL,
     max_tokens: 1500,
     messages: [
       {
@@ -121,16 +130,38 @@ Rules:
   const block = message.content[0];
   const text = block.type === "text" ? block.text : "{}";
 
+  return parseVoteResponse(text);
+}
+
+// Parse the AI vote response with robust JSON extraction
+export function parseVoteResponse(text: string): {
+  vote: "yea" | "nay" | "abstain";
+  confidence: number;
+  reasoning: string;
+  key_factors: string[];
+} {
   try {
-    // Extract JSON from the response (handle potential markdown wrapping)
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON found in response");
-    const result = JSON.parse(jsonMatch[0]);
+    // Find the last complete JSON object (avoids partial matches)
+    const jsonMatch = text.match(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g);
+    if (!jsonMatch || jsonMatch.length === 0) throw new Error("No JSON found in response");
+
+    const result = JSON.parse(jsonMatch[jsonMatch.length - 1]);
+
+    // Validate vote value
+    const validVotes = ["yea", "nay", "abstain"];
+    const vote = validVotes.includes(result.vote) ? result.vote : "abstain";
+
+    // Validate confidence is a number between 0 and 1
+    const rawConfidence = Number(result.confidence);
+    const confidence = Number.isFinite(rawConfidence)
+      ? Math.min(1, Math.max(0, rawConfidence))
+      : 0.5;
+
     return {
-      vote: result.vote || "abstain",
-      confidence: Math.min(1, Math.max(0, result.confidence || 0.5)),
-      reasoning: result.reasoning || "Unable to generate reasoning.",
-      key_factors: result.key_factors || [],
+      vote,
+      confidence,
+      reasoning: typeof result.reasoning === "string" ? result.reasoning : "Unable to generate reasoning.",
+      key_factors: Array.isArray(result.key_factors) ? result.key_factors : [],
     };
   } catch {
     return {
@@ -147,15 +178,18 @@ Rules:
 
 export async function generateConsensusReasoning(
   bill: Bill,
-  votes: { vote: string; reasoning: string }[]
+  votes: { vote: string; reasoning: string }[],
+  apiKey?: string
 ): Promise<string> {
-  const client = getClient();
+  if (votes.length === 0) return "";
+
+  const client = getClient(apiKey);
 
   const yeas = votes.filter((v) => v.vote === "yea");
   const nays = votes.filter((v) => v.vote === "nay");
 
   const message = await client.messages.create({
-    model: "claude-sonnet-4-5-20250929",
+    model: DEFAULT_MODEL,
     max_tokens: 1024,
     messages: [
       {
@@ -167,10 +201,10 @@ Bill: ${bill.title}
 Total votes: ${votes.length} (${yeas.length} yea, ${nays.length} nay, ${votes.length - yeas.length - nays.length} abstain)
 
 Sample YEA reasoning:
-${yeas.slice(0, 5).map((v) => `- ${v.reasoning}`).join("\n")}
+${yeas.slice(0, 5).map((v) => `- ${v.reasoning}`).join("\n") || "None"}
 
 Sample NAY reasoning:
-${nays.slice(0, 5).map((v) => `- ${v.reasoning}`).join("\n")}
+${nays.slice(0, 5).map((v) => `- ${v.reasoning}`).join("\n") || "None"}
 
 Write a 2-3 sentence summary of the collective sentiment. Be balanced and represent both sides fairly. This will be displayed as "The People's Position" on this bill.`,
       },
@@ -183,7 +217,7 @@ Write a 2-3 sentence summary of the collective sentiment. Be balanced and repres
 
 // ─── Helper: describe a score as human-readable text ───
 
-function describeScore(
+export function describeScore(
   score: number,
   rightLabel: string,
   leftLabel: string

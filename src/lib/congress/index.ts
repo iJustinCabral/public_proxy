@@ -1,12 +1,12 @@
 const CONGRESS_API_BASE = "https://api.congress.gov/v3";
 
-function getApiKey(): string {
+export function getApiKey(): string {
   const key = process.env.CONGRESS_API_KEY;
-  if (!key) throw new Error("CONGRESS_API_KEY is not set");
+  if (!key) throw new Error("CONGRESS_API_KEY is not set. Sign up at https://api.congress.gov/sign-up/");
   return key;
 }
 
-interface CongressBillListItem {
+export interface CongressBillListItem {
   congress: number;
   type: string;
   number: number;
@@ -15,7 +15,7 @@ interface CongressBillListItem {
   url: string;
 }
 
-interface CongressBillDetail {
+export interface CongressBillDetail {
   congress: number;
   type: string;
   number: number;
@@ -34,7 +34,7 @@ interface CongressBillDetail {
   summaries?: { url: string };
 }
 
-interface CongressSummary {
+export interface CongressSummary {
   versionCode: string;
   actionDate: string;
   text: string;
@@ -49,7 +49,9 @@ export async function fetchRecentBills(
 ): Promise<CongressBillListItem[]> {
   const url = `${CONGRESS_API_BASE}/bill/${congress}/${billType}?api_key=${getApiKey()}&format=json&limit=${limit}&offset=${offset}&sort=updateDate+desc`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Congress API error: ${res.status}`);
+  if (!res.ok) {
+    throw new Error(`Congress API error ${res.status}: ${res.statusText}`);
+  }
   const data = await res.json();
   return data.bills || [];
 }
@@ -62,7 +64,9 @@ export async function fetchBillDetail(
 ): Promise<CongressBillDetail> {
   const url = `${CONGRESS_API_BASE}/bill/${congress}/${billType}/${billNumber}?api_key=${getApiKey()}&format=json`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Congress API error: ${res.status}`);
+  if (!res.ok) {
+    throw new Error(`Congress API error ${res.status} for bill ${billType}${billNumber}`);
+  }
   const data = await res.json();
   return data.bill;
 }
@@ -129,6 +133,28 @@ export function inferBillStatus(latestActionText: string | undefined): string {
   return "introduced";
 }
 
+// Map bill type to Congress.gov URL path segment
+function billTypeToUrlSegment(billType: string): string {
+  const map: Record<string, string> = {
+    hr: "house-bill",
+    s: "senate-bill",
+    hjres: "house-joint-resolution",
+    sjres: "senate-joint-resolution",
+    hconres: "house-concurrent-resolution",
+    sconres: "senate-concurrent-resolution",
+    hres: "house-resolution",
+    sres: "senate-resolution",
+  };
+  return map[billType.toLowerCase()] || "house-bill";
+}
+
+// Format ordinal suffix for congress number
+function ordinal(n: number): string {
+  const s = ["th", "st", "nd", "rd"];
+  const v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}
+
 // High-level: sync a batch of bills from Congress.gov into our format
 export async function syncBills(
   congress: number = 118,
@@ -143,6 +169,10 @@ export async function syncBills(
       const detail = await fetchBillDetail(congress, billType, bill.number);
       const summaries = await fetchBillSummaries(congress, billType, bill.number);
       const subjects = await fetchBillSubjects(congress, billType, bill.number);
+
+      // Also fetch the text URL
+      const textVersions = await fetchBillTextVersions(congress, billType, bill.number);
+      const latestTextUrl = textVersions.length > 0 ? textVersions[textVersions.length - 1].url : null;
 
       const latestSummary = summaries.length > 0 ? summaries[summaries.length - 1] : null;
       const sponsor = detail.sponsors?.[0];
@@ -166,8 +196,8 @@ export async function syncBills(
         sponsor_state: sponsor?.state || null,
         policy_area: detail.policyArea?.name || null,
         subjects,
-        full_text_url: null,
-        congress_url: `https://www.congress.gov/bill/${congress}th-congress/${billType === "hr" ? "house-bill" : "senate-bill"}/${bill.number}`,
+        full_text_url: latestTextUrl,
+        congress_url: `https://www.congress.gov/bill/${ordinal(congress)}-congress/${billTypeToUrlSegment(billType)}/${bill.number}`,
         status: inferBillStatus(detail.latestAction?.text),
       });
     } catch (err) {

@@ -2,8 +2,8 @@ import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
 
-const DB_PATH = path.join(process.cwd(), "democraic.db");
-const SCHEMA_PATH = path.join(process.cwd(), "src/lib/db/schema.sql");
+const DB_PATH = path.resolve(process.cwd(), "democraic.db");
+const SCHEMA_PATH = path.resolve(process.cwd(), "src/lib/db/schema.sql");
 
 let db: Database.Database | null = null;
 
@@ -13,32 +13,50 @@ export function getDb(): Database.Database {
     db.pragma("journal_mode = WAL");
     db.pragma("foreign_keys = ON");
 
-    // Run schema migration
     const schema = fs.readFileSync(SCHEMA_PATH, "utf-8");
     db.exec(schema);
   }
   return db;
 }
 
+// Close the current connection (for cleanup / testing)
+export function closeDb() {
+  if (db) {
+    db.close();
+    db = null;
+  }
+}
+
+// Initialize with a specific path (for testing with :memory: or temp files)
+export function initDb(dbPath: string): Database.Database {
+  closeDb();
+  db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+  const schema = fs.readFileSync(SCHEMA_PATH, "utf-8");
+  db.exec(schema);
+  return db;
+}
+
 // ─── User queries ───
 
 export function createUser(id: string, name: string, email: string) {
-  const db = getDb();
-  return db
+  const d = getDb();
+  return d
     .prepare("INSERT INTO users (id, name, email) VALUES (?, ?, ?)")
     .run(id, name, email);
 }
 
 export function getUserByEmail(email: string) {
-  const db = getDb();
-  return db.prepare("SELECT * FROM users WHERE email = ?").get(email) as
+  const d = getDb();
+  return d.prepare("SELECT * FROM users WHERE email = ?").get(email) as
     | User
     | undefined;
 }
 
 export function getUser(id: string) {
-  const db = getDb();
-  return db.prepare("SELECT * FROM users WHERE id = ?").get(id) as
+  const d = getDb();
+  return d.prepare("SELECT * FROM users WHERE id = ?").get(id) as
     | User
     | undefined;
 }
@@ -46,8 +64,8 @@ export function getUser(id: string) {
 // ─── Political Profile queries ───
 
 export function upsertPoliticalProfile(profile: PoliticalProfile) {
-  const db = getDb();
-  return db
+  const d = getDb();
+  return d
     .prepare(
       `INSERT INTO political_profiles (id, user_id, economic_score, social_score, foreign_policy_score, environment_score, healthcare_score, immigration_score, gun_policy_score, education_score, questionnaire_answers, core_values, top_priorities, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
@@ -77,8 +95,8 @@ export function upsertPoliticalProfile(profile: PoliticalProfile) {
 }
 
 export function getPoliticalProfile(userId: string) {
-  const db = getDb();
-  return db
+  const d = getDb();
+  return d
     .prepare("SELECT * FROM political_profiles WHERE user_id = ?")
     .get(userId) as PoliticalProfile | undefined;
 }
@@ -86,13 +104,20 @@ export function getPoliticalProfile(userId: string) {
 // ─── Bill queries ───
 
 export function upsertBill(bill: Partial<Omit<Bill, "subjects"> & { subjects?: string | string[] }>) {
-  const db = getDb();
-  return db
+  const d = getDb();
+  // Handle subjects as either string[] from Congress sync or string from DB
+  const subjectsStr =
+    typeof bill.subjects === "string"
+      ? bill.subjects
+      : JSON.stringify(bill.subjects || []);
+
+  return d
     .prepare(
       `INSERT INTO bills (id, congress, bill_type, bill_number, title, short_title, summary, ai_summary, latest_action_text, latest_action_date, introduced_date, sponsor_name, sponsor_party, sponsor_state, policy_area, subjects, full_text_url, congress_url, status, synced_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
      ON CONFLICT(congress, bill_type, bill_number) DO UPDATE SET
        title=excluded.title, short_title=excluded.short_title, summary=excluded.summary,
+       ai_summary=COALESCE(excluded.ai_summary, bills.ai_summary),
        latest_action_text=excluded.latest_action_text, latest_action_date=excluded.latest_action_date,
        sponsor_name=excluded.sponsor_name, sponsor_party=excluded.sponsor_party,
        sponsor_state=excluded.sponsor_state, policy_area=excluded.policy_area,
@@ -107,7 +132,7 @@ export function upsertBill(bill: Partial<Omit<Bill, "subjects"> & { subjects?: s
       bill.title,
       bill.short_title,
       bill.summary,
-      bill.ai_summary,
+      bill.ai_summary || null,
       bill.latest_action_text,
       bill.latest_action_date,
       bill.introduced_date,
@@ -115,7 +140,7 @@ export function upsertBill(bill: Partial<Omit<Bill, "subjects"> & { subjects?: s
       bill.sponsor_party,
       bill.sponsor_state,
       bill.policy_area,
-      JSON.stringify(bill.subjects || []),
+      subjectsStr,
       bill.full_text_url,
       bill.congress_url,
       bill.status
@@ -123,17 +148,23 @@ export function upsertBill(bill: Partial<Omit<Bill, "subjects"> & { subjects?: s
 }
 
 export function getBills(limit = 20, offset = 0) {
-  const db = getDb();
-  return db
+  const d = getDb();
+  return d
     .prepare(
       "SELECT * FROM bills ORDER BY introduced_date DESC LIMIT ? OFFSET ?"
     )
     .all(limit, offset) as Bill[];
 }
 
+export function getBillCount(): number {
+  const d = getDb();
+  const row = d.prepare("SELECT COUNT(*) as count FROM bills").get() as { count: number };
+  return row.count;
+}
+
 export function getBill(id: string) {
-  const db = getDb();
-  return db.prepare("SELECT * FROM bills WHERE id = ?").get(id) as
+  const d = getDb();
+  return d.prepare("SELECT * FROM bills WHERE id = ?").get(id) as
     | Bill
     | undefined;
 }
@@ -143,8 +174,8 @@ export function getBillByNumber(
   billType: string,
   billNumber: number
 ) {
-  const db = getDb();
-  return db
+  const d = getDb();
+  return d
     .prepare(
       "SELECT * FROM bills WHERE congress = ? AND bill_type = ? AND bill_number = ?"
     )
@@ -154,8 +185,8 @@ export function getBillByNumber(
 // ─── Vote queries ───
 
 export function upsertVote(vote: AgentVote) {
-  const db = getDb();
-  return db
+  const d = getDb();
+  return d
     .prepare(
       `INSERT INTO agent_votes (id, user_id, bill_id, vote, confidence, reasoning, key_factors, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
@@ -175,8 +206,8 @@ export function upsertVote(vote: AgentVote) {
 }
 
 export function getUserVotes(userId: string) {
-  const db = getDb();
-  return db
+  const d = getDb();
+  return d
     .prepare(
       `SELECT av.*, b.title as bill_title, b.short_title as bill_short_title
      FROM agent_votes av JOIN bills b ON av.bill_id = b.id
@@ -186,15 +217,15 @@ export function getUserVotes(userId: string) {
 }
 
 export function getVotesForBill(billId: string) {
-  const db = getDb();
-  return db
+  const d = getDb();
+  return d
     .prepare("SELECT * FROM agent_votes WHERE bill_id = ?")
     .all(billId) as AgentVote[];
 }
 
 export function getUserVoteOnBill(userId: string, billId: string) {
-  const db = getDb();
-  return db
+  const d = getDb();
+  return d
     .prepare(
       "SELECT * FROM agent_votes WHERE user_id = ? AND bill_id = ?"
     )
@@ -203,36 +234,37 @@ export function getUserVoteOnBill(userId: string, billId: string) {
 
 // ─── Tally queries ───
 
-export function updateTally(billId: string) {
-  const db = getDb();
+export function updateTally(billId: string, consensusReasoning?: string) {
+  const d = getDb();
   const votes = getVotesForBill(billId);
   const yea = votes.filter((v) => v.vote === "yea").length;
   const nay = votes.filter((v) => v.vote === "nay").length;
   const abstain = votes.filter((v) => v.vote === "abstain").length;
   const consensus = yea >= nay ? (yea > 0 ? "yea" : "abstain") : "nay";
 
-  return db
+  return d
     .prepare(
-      `INSERT INTO representative_tallies (id, bill_id, total_yea, total_nay, total_abstain, consensus_vote, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+      `INSERT INTO representative_tallies (id, bill_id, total_yea, total_nay, total_abstain, consensus_vote, consensus_reasoning, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
      ON CONFLICT(bill_id) DO UPDATE SET
        total_yea=excluded.total_yea, total_nay=excluded.total_nay,
        total_abstain=excluded.total_abstain, consensus_vote=excluded.consensus_vote,
+       consensus_reasoning=COALESCE(excluded.consensus_reasoning, representative_tallies.consensus_reasoning),
        updated_at=datetime('now')`
     )
-    .run(billId, billId, yea, nay, abstain, consensus);
+    .run(`tally-${billId}`, billId, yea, nay, abstain, consensus, consensusReasoning || null);
 }
 
 export function getTally(billId: string) {
-  const db = getDb();
-  return db
+  const d = getDb();
+  return d
     .prepare("SELECT * FROM representative_tallies WHERE bill_id = ?")
     .get(billId) as RepresentativeTally | undefined;
 }
 
 export function getAllTallies() {
-  const db = getDb();
-  return db
+  const d = getDb();
+  return d
     .prepare(
       `SELECT rt.*, b.title as bill_title, b.short_title as bill_short_title
      FROM representative_tallies rt JOIN bills b ON rt.bill_id = b.id
